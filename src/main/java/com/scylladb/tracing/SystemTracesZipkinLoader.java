@@ -1,21 +1,4 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-package com.thelastpickle.cassandra.tracing;
+package com.scylladb.tracing;
 
 import com.datastax.driver.core.AtomicMonotonicTimestampGenerator;
 import com.github.kristofa.brave.Brave;
@@ -27,9 +10,18 @@ import com.github.kristofa.brave.SpanCollector;
 import com.github.kristofa.brave.SpanId;
 import com.github.kristofa.brave.http.HttpSpanCollector;
 import com.google.common.collect.ImmutableMap;
+import com.thelastpickle.cassandra.tracing.ZipkinTraceState;
+import com.thelastpickle.cassandra.tracing.ZipkinTracing;
 import com.twitter.zipkin.gen.Span;
-import org.apache.cassandra.net.MessageIn;
+
+import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.Row;
+import com.datastax.driver.core.Session;
+import com.datastax.driver.core.PreparedStatement;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.tracing.TraceState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
@@ -38,26 +30,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-public final class ZipkinTracing extends Tracing
-{
+public class SystemTracesZipkinLoader extends Tracing {
+
     public static final String ZIPKIN_TRACE_HEADERS = "zipkin";
 
     static final int SAMPLE_RATE = 1;
 
     private static final Logger logger = LoggerFactory.getLogger(ZipkinTracing.class);
 
-    private static final String HTTP_SPAN_COLLECTOR_HOST = System.getProperty("ZipkinTracing.httpCollectorHost", "127.0.0.1");
+    private static final String HTTP_SPAN_COLLECTOR_HOST = System.getProperty("ZipkinTracing.httpCollectorHost", "localhost");
     private static final String HTTP_SPAN_COLLECTOR_PORT = System.getProperty("ZipkinTracing.httpCollectorPort", "9411");
     private static final String HTTP_COLLECTOR_URL = "http://" + HTTP_SPAN_COLLECTOR_HOST + ':' + HTTP_SPAN_COLLECTOR_PORT;
 
     private final SpanCollector spanCollector
             = HttpSpanCollector.create(HTTP_COLLECTOR_URL, new EmptySpanCollectorMetricsHandler());
-            //= KafkaSpanCollector.create("127.0.0.1:9092", new EmptySpanCollectorMetricsHandler());
+    //= KafkaSpanCollector.create("127.0.0.1:9092", new EmptySpanCollectorMetricsHandler());
 
     private final Sampler SAMPLER = Sampler.ALWAYS_SAMPLE;
 
@@ -70,11 +64,6 @@ public final class ZipkinTracing extends Tracing
             .clock(() -> { return TIMESTAMP_GENERATOR.next(); })
             .build();
 
-
-    public ZipkinTracing()
-    {
-    }
-
     ClientTracer getClientTracer()
     {
         return brave.clientTracer();
@@ -85,15 +74,19 @@ public final class ZipkinTracing extends Tracing
         return brave.serverTracer();
     }
 
+    public SystemTracesZipkinLoader() {
+
+    }
+
     // defensive override, see CASSANDRA-11706
     @Override
     public UUID newSession(UUID sessionId, Map<String,ByteBuffer> customPayload)
     {
-        return newSession(sessionId, TraceType.QUERY, customPayload);
+        return newSession(sessionId, Tracing.TraceType.QUERY, customPayload);
     }
 
     @Override
-    protected UUID newSession(UUID sessionId, TraceType traceType, Map<String,ByteBuffer> customPayload)
+    protected UUID newSession(UUID sessionId, Tracing.TraceType traceType, Map<String,ByteBuffer> customPayload)
     {
         ByteBuffer bb = null != customPayload ? customPayload.get(ZIPKIN_TRACE_HEADERS) : null;
         if (null != bb)
@@ -115,7 +108,6 @@ public final class ZipkinTracing extends Tracing
         return super.newSession(sessionId, traceType, customPayload);
     }
 
-    @Override
     protected void stopSessionImpl()
     {
         ZipkinTraceState state = (ZipkinTraceState) get();
@@ -127,7 +119,6 @@ public final class ZipkinTracing extends Tracing
         }
     }
 
-    @Override
     public void doneWithNonLocalSession(TraceState s)
     {
         ZipkinTraceState state = (ZipkinTraceState) s;
@@ -137,7 +128,6 @@ public final class ZipkinTracing extends Tracing
         super.doneWithNonLocalSession(state);
     }
 
-    @Override
     public TraceState begin(String request, InetAddress client, Map<String, String> parameters)
     {
         if (null != client)
@@ -147,7 +137,6 @@ public final class ZipkinTracing extends Tracing
         return get();
     }
 
-    @Override
     public TraceState initializeFromMessage(final MessageIn<?> message)
     {
         byte [] bytes = message.parameters.get(ZIPKIN_TRACE_HEADERS);
@@ -215,8 +204,7 @@ public final class ZipkinTracing extends Tracing
         state.trace(message);
     }
 
-    @Override
-    protected TraceState newTraceState(InetAddress coordinator, UUID sessionId, TraceType traceType)
+    protected TraceState newTraceState(InetAddress coordinator, UUID sessionId, Tracing.TraceType traceType)
     {
         getServerTracer().setServerReceived();
         getServerTracer().submitBinaryAnnotation("sessionId", sessionId.toString());
@@ -235,4 +223,58 @@ public final class ZipkinTracing extends Tracing
     {
         return 16 == length || 24 == length || 32 == length;
     }
+
+    static Cluster cluster = Cluster.builder().addContactPoints("localhost").build();
+    static Session session = cluster.connect("system_traces");
+
+    static PreparedStatement selectEvents = session.prepare("SELECT * FROM system_traces.events where session_id=?");
+
+    public static void selectSessions(Tracing tracing) {
+        System.out.print("\n\nFetching sessions ...");
+        ResultSet results = session.execute("SELECT * FROM system_traces.sessions");
+        for (Row row : results) {
+//  session_id | client | command | coordinator | duration | parameters | request | request_size | response_size | started_at
+            String session_id = row.getString("session_id");
+            String command = row.getString("command");
+            String client = row.getString("client");
+            TraceState trace = null;
+            try {
+                trace = tracing.begin(command,InetAddress.getByAddress(client.getBytes()),new HashMap<String,String>());
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            }
+            selectEvents(session_id,trace, tracing);
+        }
+    }
+
+    public static void selectEvents(String sessionId, TraceState state, Tracing tracing) {
+        System.out.print("\n\nFetching events for session: "+sessionId+"  ...");
+        ResultSet results = session.execute(selectEvents.bind(sessionId));
+        for (Row row : results) {
+//   session_id | event_id | activity | source | scylla_parent_id | scylla_span_id | source_elapsed | thread
+            String activity = row.getString("activity");
+            String thread = row.getString("thread");
+            ((ZipkinTraceState)state).traceImplWithClientSpans(activity);
+        }
+        tracing.doneWithNonLocalSession(state);
+    }
+
+    //Indexes:
+
+    // sessions_time_idx
+    // node_slow_log_time_idx
+    // minute | started_at | session_id | start_time | node_ip | shard
+// SELECT * from system_traces.sessions_time_idx where minutes in ('2016-09-07 16:56:00-0700') and started_at > '2016-09-07 16:56:30-0700';
+
+// system_traces.node_slow_log table ???
+    // start_time | date | node_ip | shard | command | duration | parameters | session_id | source ip | table_names | username
+
+    public static void main(String[] args)  {
+
+        Tracing tracing = new SystemTracesZipkinLoader();
+        selectSessions(tracing);
+        cluster.close();
+
+    }
+
 }

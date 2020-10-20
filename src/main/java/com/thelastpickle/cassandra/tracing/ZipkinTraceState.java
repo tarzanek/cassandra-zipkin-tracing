@@ -35,7 +35,7 @@ import java.util.concurrent.TimeUnit;
  * ThreadLocal state for a tracing session. The presence of an instance of this class as a ThreadLocal denotes that an
  * operation is being traced.
  */
-final class ZipkinTraceState extends TraceState
+final public class ZipkinTraceState extends TraceState
 {
     private final Brave brave;
     private final ServerSpan serverSpan;
@@ -72,7 +72,7 @@ final class ZipkinTraceState extends TraceState
         closeClientSpans();
     }
 
-    private void traceImplWithClientSpans(String message)
+    public void traceImplWithClientSpans(String message)
     {
         brave.serverSpanThreadBinder().setCurrentSpan(serverSpan);
         if (null != currentSpan.get())
