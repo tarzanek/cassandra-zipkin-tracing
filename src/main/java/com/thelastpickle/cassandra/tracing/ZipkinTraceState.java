@@ -66,7 +66,7 @@ final public class ZipkinTraceState extends TraceState
         traceImplWithClientSpans(message);
     }
 
-    void close()
+    public void close()
     {
         brave.serverSpanThreadBinder().setCurrentSpan(serverSpan);
         closeClientSpans();

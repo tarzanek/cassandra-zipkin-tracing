@@ -78,6 +78,10 @@ public class SystemTracesZipkinLoader extends Tracing {
 
     }
 
+    public void stop() {
+
+    }
+
     // defensive override, see CASSANDRA-11706
     @Override
     public UUID newSession(UUID sessionId, Map<String,ByteBuffer> customPayload)
@@ -232,22 +236,26 @@ public class SystemTracesZipkinLoader extends Tracing {
     public static void selectSessions(Tracing tracing) {
         System.out.print("\n\nFetching sessions ...");
         ResultSet results = session.execute("SELECT * FROM system_traces.sessions");
+        Map payload=new HashMap<String, ByteBuffer>();
         for (Row row : results) {
 //  session_id | client | command | coordinator | duration | parameters | request | request_size | response_size | started_at
-            String session_id = row.getString("session_id");
+            UUID session_id = row.getUUID("session_id");
             String command = row.getString("command");
-            String client = row.getString("client");
-            TraceState trace = null;
-            try {
-                trace = tracing.begin(command,InetAddress.getByAddress(client.getBytes()),new HashMap<String,String>());
-            } catch (UnknownHostException e) {
-                e.printStackTrace();
+            InetAddress client = row.getInet("client");
+            if (command != null && command.isEmpty()) {
+                payload.put(ZIPKIN_TRACE_HEADERS, command);
+            } else {
+                payload = new HashMap<String, ByteBuffer>();
             }
+            tracing.newSession(session_id,payload);
+            TraceState trace = null;
+            trace = tracing.begin(command,client,new HashMap<String,String>());
             selectEvents(session_id,trace, tracing);
+            tracing.stopSession();
         }
     }
 
-    public static void selectEvents(String sessionId, TraceState state, Tracing tracing) {
+    public static void selectEvents(UUID sessionId, TraceState state, Tracing tracing) {
         System.out.print("\n\nFetching events for session: "+sessionId+"  ...");
         ResultSet results = session.execute(selectEvents.bind(sessionId));
         for (Row row : results) {
@@ -271,9 +279,16 @@ public class SystemTracesZipkinLoader extends Tracing {
 
     public static void main(String[] args)  {
 
+
         Tracing tracing = new SystemTracesZipkinLoader();
         selectSessions(tracing);
         cluster.close();
+
+        tracing.stopSession();
+        SystemTracesZipkinLoader caster = (SystemTracesZipkinLoader)tracing;
+        caster.stop();
+
+        System.exit(0);
 
     }
 
